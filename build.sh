@@ -7,8 +7,9 @@ EXECUTABLE="SysBar"
 APP_BUNDLE="build/${APP_NAME}.app"
 
 rm -rf "$APP_BUNDLE"
-mkdir -p "$APP_BUNDLE/Contents/MacOS"
+mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
 cp Info.plist "$APP_BUNDLE/Contents/Info.plist"
+cp Assets/AppIcon.icns "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 
 swiftc -O -swift-version 5 \
     -target arm64-apple-macos14.0 \

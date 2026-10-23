@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="Assets/AppIcon.png" width="128" alt="系统监控图标">
+</p>
+
 # 系统监控 / SysBar
 
 一个常驻 macOS 菜单栏的小工具，实时显示 CPU 温度、CPU 使用率、内存占用率、SSD 温度、网络速度。
@@ -120,6 +124,7 @@ ditto "build/系统监控.app" "/Applications/系统监控.app"
 - `Sources/NetworkSampler.swift`：网卡计数、速率与 IP
 - `Sources/Version.swift`：版本号解析与比较
 - `Sources/Updater.swift`：GitHub Release 检查、下载、校验与自动安装
+- `Assets/AppIcon.icns`：应用图标
 - `Tests/main.swift` + `test.sh`：传感器分类与版本比较测试
 
 ## 发布新版本
