@@ -4,6 +4,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private enum MenuBarStyle: String {
         case labeled
         case compact
+        case stacked
     }
 
     private enum MenuBarMetric: Int, CaseIterable {
@@ -35,6 +36,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    private struct StackedColumn {
+        let top: String
+        let topColor: NSColor
+        let bottom: String
+        let bottomIsValue: Bool
+        let isNetwork: Bool
+    }
+
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let cpuSampler = CPUSampler()
     private let memorySampler = MemorySampler()
@@ -53,7 +62,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }()
 
     private var menuBarStyle: MenuBarStyle {
-        MenuBarStyle(rawValue: UserDefaults.standard.string(forKey: "menuBarStyle") ?? "") ?? .labeled
+        MenuBarStyle(rawValue: UserDefaults.standard.string(forKey: "menuBarStyle") ?? "") ?? .stacked
     }
 
     private var highContrastBackground: Bool {
@@ -62,6 +71,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private let launchAgentLabel = "com.denny.sysbar"
     private let startedAt = Date()
+
+    private lazy var updateManager = UpdateManager(
+        currentVersion: currentVersionString,
+        bundleIdentifier: Bundle.main.bundleIdentifier ?? "com.denny.sysbar"
+    )
+    private var updatePanel: UpdateProgressPanel?
+    private var updateBusy = false
+
+    private var currentVersionString: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let menu = NSMenu()
@@ -185,33 +205,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func updateStatusItem() {
         guard let button = statusItem.button else { return }
         let style = menuBarStyle
-        let labelFont = NSFont.systemFont(ofSize: 11, weight: .medium)
-        let valueFont = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)
-
-        var baseAttributes: [NSAttributedString.Key: Any] = [:]
-        if !highContrastBackground {
-            let shadow = NSShadow()
-            shadow.shadowColor = NSColor.black.withAlphaComponent(0.55)
-            shadow.shadowBlurRadius = 1.5
-            shadow.shadowOffset = NSSize(width: 0, height: -1)
-            baseAttributes[.shadow] = shadow
-            baseAttributes[.strokeColor] = NSColor.black.withAlphaComponent(0.25)
-            baseAttributes[.strokeWidth] = -1.0
-        }
-
-        func attributed(_ text: String, font: NSFont, color: NSColor) -> NSAttributedString {
-            var attributes = baseAttributes
-            attributes[.font] = font
-            attributes[.foregroundColor] = color
-            return NSAttributedString(string: text, attributes: attributes)
-        }
-        func label(_ text: String) -> NSAttributedString {
-            attributed(text, font: labelFont, color: .white)
-        }
-        func value(_ text: String, color: NSColor = .white) -> NSAttributedString {
-            attributed(text, font: valueFont, color: color)
-        }
-
         let temperatureText = cpuTemperature.map { "\(Int($0.rounded()))°" } ?? "--°"
         let cpuText = "\(Int(cpuSample.total.rounded()))%"
         let memoryText = "\(Int(memorySample.percent.rounded()))%"
@@ -219,54 +212,122 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let downloadText = "↓\(Self.compactRate(networkSample.downloadPerSecond))"
         let uploadText = "↑\(Self.compactRate(networkSample.uploadPerSecond))"
 
-        var segments: [NSAttributedString] = []
+        if style == .stacked {
+            var columns: [StackedColumn] = []
+            if MenuBarMetric.cpu.isVisible {
+                columns.append(StackedColumn(top: cpuText, topColor: .white, bottom: "CPU", bottomIsValue: false, isNetwork: false))
+                let stackedTemperature = cpuTemperature.map { "\(Int($0.rounded()))°C" } ?? "--°C"
+                columns.append(StackedColumn(top: stackedTemperature, topColor: temperatureColor, bottom: "TEMP", bottomIsValue: false, isNetwork: false))
+            }
+            if MenuBarMetric.memory.isVisible {
+                columns.append(StackedColumn(top: memoryText, topColor: memoryColor, bottom: "RAM", bottomIsValue: false, isNetwork: false))
+            }
+            if MenuBarMetric.disk.isVisible {
+                let stackedDisk = diskTemperature.map { "\(Int($0.rounded()))°C" } ?? "--°C"
+                columns.append(StackedColumn(top: stackedDisk, topColor: diskColor, bottom: "SSD", bottomIsValue: false, isNetwork: false))
+            }
+            if MenuBarMetric.network.isVisible {
+                columns.append(StackedColumn(
+                    top: "↑\(Self.stackedRate(networkSample.uploadPerSecond))",
+                    topColor: .white,
+                    bottom: "↓\(Self.stackedRate(networkSample.downloadPerSecond))",
+                    bottomIsValue: true,
+                    isNetwork: true
+                ))
+            }
 
-        if MenuBarMetric.cpu.isVisible {
-            let segment = NSMutableAttributedString()
-            if style == .labeled { segment.append(label("CPU ")) }
-            segment.append(value(temperatureText, color: temperatureColor))
-            segment.append(attributed("/", font: valueFont, color: .white))
-            segment.append(value(cpuText))
-            segments.append(segment)
-        }
+            if let image = makeStackedStatusImage(columns: columns) {
+                button.attributedTitle = NSAttributedString()
+                button.imageScaling = .scaleNone
+                button.imagePosition = .imageOnly
+                button.image = image
+            } else {
+                button.image = nil
+                button.imagePosition = .noImage
+                button.attributedTitle = NSAttributedString(
+                    string: "系统监控",
+                    attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.white]
+                )
+            }
+        } else {
+            button.image = nil
+            button.imagePosition = .noImage
+            let labelFont = NSFont.systemFont(ofSize: 11, weight: .medium)
+            let valueFont = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)
 
-        if MenuBarMetric.memory.isVisible {
-            let segment = NSMutableAttributedString()
-            if style == .labeled { segment.append(label("RAM ")) }
-            segment.append(value(memoryText, color: memoryColor))
-            segments.append(segment)
-        }
+            var baseAttributes: [NSAttributedString.Key: Any] = [:]
+            if !highContrastBackground {
+                let shadow = NSShadow()
+                shadow.shadowColor = NSColor.black.withAlphaComponent(0.55)
+                shadow.shadowBlurRadius = 1.5
+                shadow.shadowOffset = NSSize(width: 0, height: -1)
+                baseAttributes[.shadow] = shadow
+                baseAttributes[.strokeColor] = NSColor.black.withAlphaComponent(0.25)
+                baseAttributes[.strokeWidth] = -1.0
+            }
 
-        if MenuBarMetric.disk.isVisible {
-            let segment = NSMutableAttributedString()
-            if style == .labeled { segment.append(label("SSD ")) }
-            segment.append(value(diskText, color: diskColor))
-            segments.append(segment)
-        }
+            func attributed(_ text: String, font: NSFont, color: NSColor) -> NSAttributedString {
+                var attributes = baseAttributes
+                attributes[.font] = font
+                attributes[.foregroundColor] = color
+                return NSAttributedString(string: text, attributes: attributes)
+            }
+            func label(_ text: String) -> NSAttributedString {
+                attributed(text, font: labelFont, color: .white)
+            }
+            func value(_ text: String, color: NSColor = .white) -> NSAttributedString {
+                attributed(text, font: valueFont, color: color)
+            }
 
-        if MenuBarMetric.network.isVisible {
-            let segment = NSMutableAttributedString()
-            segment.append(value(downloadText))
-            segment.append(value(uploadText))
-            segments.append(segment)
-        }
+            var segments: [NSAttributedString] = []
 
-        if segments.isEmpty {
-            segments.append(label("系统监控"))
-        }
+            if MenuBarMetric.cpu.isVisible {
+                let segment = NSMutableAttributedString()
+                if style == .labeled { segment.append(label("CPU ")) }
+                segment.append(value(temperatureText, color: temperatureColor))
+                segment.append(attributed("/", font: valueFont, color: .white))
+                segment.append(value(cpuText))
+                segments.append(segment)
+            }
 
-        let title = NSMutableAttributedString()
-        let separator = attributed(style == .labeled ? " · " : " ", font: labelFont, color: .white)
-        for (index, segment) in segments.enumerated() {
-            if index > 0 { title.append(separator) }
-            title.append(segment)
+            if MenuBarMetric.memory.isVisible {
+                let segment = NSMutableAttributedString()
+                if style == .labeled { segment.append(label("RAM ")) }
+                segment.append(value(memoryText, color: memoryColor))
+                segments.append(segment)
+            }
+
+            if MenuBarMetric.disk.isVisible {
+                let segment = NSMutableAttributedString()
+                if style == .labeled { segment.append(label("SSD ")) }
+                segment.append(value(diskText, color: diskColor))
+                segments.append(segment)
+            }
+
+            if MenuBarMetric.network.isVisible {
+                let segment = NSMutableAttributedString()
+                segment.append(value(downloadText))
+                segment.append(value(uploadText))
+                segments.append(segment)
+            }
+
+            if segments.isEmpty {
+                segments.append(label("系统监控"))
+            }
+
+            let title = NSMutableAttributedString()
+            let separator = attributed(style == .labeled ? " · " : " ", font: labelFont, color: .white)
+            for (index, segment) in segments.enumerated() {
+                if index > 0 { title.append(separator) }
+                title.append(segment)
+            }
+            if highContrastBackground {
+                let padding = attributed("\u{2009}", font: labelFont, color: .white)
+                title.insert(padding, at: 0)
+                title.append(padding)
+            }
+            button.attributedTitle = title
         }
-        if highContrastBackground {
-            let padding = attributed("\u{2009}", font: labelFont, color: .white)
-            title.insert(padding, at: 0)
-            title.append(padding)
-        }
-        button.attributedTitle = title
 
         var tooltip: [String] = []
         if let temperature = cpuTemperature {
@@ -283,6 +344,108 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         tooltip.append("网络 ↓ \(Self.rateText(networkSample.downloadPerSecond)) ↑ \(Self.rateText(networkSample.uploadPerSecond))")
         button.toolTip = tooltip.joined(separator: " ｜ ") + "\n点击查看详情"
+
+        var accessibility: [String] = []
+        if MenuBarMetric.cpu.isVisible {
+            accessibility.append("CPU 使用率 \(cpuText)")
+            accessibility.append("CPU 温度 \(temperatureText)")
+        }
+        if MenuBarMetric.memory.isVisible {
+            accessibility.append("内存 \(memoryText)")
+        }
+        if MenuBarMetric.disk.isVisible {
+            accessibility.append("硬盘温度 \(diskText)")
+        }
+        if MenuBarMetric.network.isVisible {
+            accessibility.append("上传 \(Self.rateText(networkSample.uploadPerSecond))，下载 \(Self.rateText(networkSample.downloadPerSecond))")
+        }
+        button.setAccessibilityValue(accessibility.joined(separator: "，"))
+    }
+
+    private func makeStackedStatusImage(columns: [StackedColumn]) -> NSImage? {
+        guard !columns.isEmpty else { return nil }
+
+        let valueFont = NSFont.monospacedDigitSystemFont(ofSize: 11.5, weight: .semibold)
+        let labelFont = NSFont.systemFont(ofSize: 7, weight: .medium)
+        let networkFont = NSFont.monospacedDigitSystemFont(ofSize: 9.5, weight: .regular)
+        let imageHeight: CGFloat = 22
+        let spacing: CGFloat = 10
+        let padding: CGFloat = highContrastBackground ? 6 : 2
+
+        var widths: [CGFloat] = []
+        for column in columns {
+            let topFont = column.isNetwork ? networkFont : valueFont
+            let bottomFont = column.bottomIsValue ? networkFont : labelFont
+            let topWidth = (column.top as NSString).size(withAttributes: [.font: topFont]).width
+            let bottomWidth = (column.bottom as NSString).size(withAttributes: [.font: bottomFont]).width
+            widths.append(ceil(max(topWidth, bottomWidth)) + 1)
+        }
+
+        let columnsWidth = widths.reduce(0, +)
+        let totalWidth = ceil(padding * 2 + columnsWidth + CGFloat(max(0, columns.count - 1)) * spacing)
+        let image = NSImage(size: NSSize(width: totalWidth, height: imageHeight))
+        image.lockFocusFlipped(true)
+
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        paragraph.lineBreakMode = .byClipping
+
+        func attributes(font: NSFont, color: NSColor, kern: CGFloat = 0) -> [NSAttributedString.Key: Any] {
+            var result: [NSAttributedString.Key: Any] = [
+                .font: font,
+                .foregroundColor: color,
+                .paragraphStyle: paragraph
+            ]
+            if kern != 0 { result[.kern] = kern }
+            if !highContrastBackground {
+                let shadow = NSShadow()
+                shadow.shadowColor = NSColor.black.withAlphaComponent(0.55)
+                shadow.shadowBlurRadius = 1.2
+                shadow.shadowOffset = NSSize(width: 0, height: -1)
+                result[.shadow] = shadow
+                result[.strokeColor] = NSColor.black.withAlphaComponent(0.25)
+                result[.strokeWidth] = -1.0
+            }
+            return result
+        }
+
+        var x = padding
+        for (index, column) in columns.enumerated() {
+            let width = widths[index]
+            if column.isNetwork {
+                let topRect = NSRect(x: x, y: 0, width: width, height: 10.5)
+                let bottomRect = NSRect(x: x, y: 11, width: width, height: 11)
+                (column.top as NSString).draw(
+                    in: topRect,
+                    withAttributes: attributes(font: networkFont, color: .white)
+                )
+                (column.bottom as NSString).draw(
+                    in: bottomRect,
+                    withAttributes: attributes(font: networkFont, color: .white)
+                )
+            } else {
+                let topRect = NSRect(x: x, y: 0, width: width, height: 14)
+                let bottomRect = NSRect(x: x, y: 13.5, width: width, height: 8.5)
+                (column.top as NSString).draw(
+                    in: topRect,
+                    withAttributes: attributes(font: valueFont, color: column.topColor)
+                )
+                (column.bottom as NSString).draw(
+                    in: bottomRect,
+                    withAttributes: attributes(font: labelFont, color: .white, kern: 0.4)
+                )
+            }
+            x += width
+            if index < columns.count - 1 {
+                NSColor.white.withAlphaComponent(0.32).setFill()
+                NSRect(x: x + spacing / 2, y: 2, width: 1, height: imageHeight - 4).fill()
+                x += spacing
+            }
+        }
+
+        image.unlockFocus()
+        image.isTemplate = false
+        return image
     }
 
     private func applyStatusItemBackground() {
@@ -398,6 +561,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         diagnosticsItem.target = self
         menu.addItem(diagnosticsItem)
 
+        let updateItem = NSMenuItem(title: "检查更新…", action: #selector(checkForUpdates), keyEquivalent: "")
+        updateItem.target = self
+        menu.addItem(updateItem)
+
         menu.addItem(.separator())
 
         let quitItem = NSMenuItem(title: "退出系统监控", action: #selector(quit), keyEquivalent: "q")
@@ -428,6 +595,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         compactItem.tag = 1
         compactItem.state = menuBarStyle == .compact ? .on : .off
         menu.addItem(compactItem)
+
+        let stackedItem = NSMenuItem(title: "双行数据", action: #selector(setMenuBarStyle(_:)), keyEquivalent: "")
+        stackedItem.target = self
+        stackedItem.tag = 2
+        stackedItem.state = menuBarStyle == .stacked ? .on : .off
+        menu.addItem(stackedItem)
 
         menu.addItem(.separator())
         let contrastItem = NSMenuItem(title: "高对比底色", action: #selector(toggleHighContrastBackground), keyEquivalent: "")
@@ -605,7 +778,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func setMenuBarStyle(_ sender: NSMenuItem) {
-        let style: MenuBarStyle = sender.tag == 1 ? .compact : .labeled
+        let style: MenuBarStyle
+        switch sender.tag {
+        case 1: style = .compact
+        case 2: style = .stacked
+        default: style = .labeled
+        }
         UserDefaults.standard.set(style.rawValue, forKey: "menuBarStyle")
         updateStatusItem()
     }
@@ -731,7 +909,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         let visibleMetrics = MenuBarMetric.allCases.filter { $0.isVisible }.map(\.title).joined(separator: "、")
-        let styleName = menuBarStyle == .labeled ? "带标签" : "紧凑数字"
+        let styleName: String
+        switch menuBarStyle {
+        case .labeled: styleName = "带标签"
+        case .compact: styleName = "紧凑数字"
+        case .stacked: styleName = "双行数据"
+        }
 
         return [
             "版本 \(version)（\(build)）",
@@ -748,6 +931,147 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             "开机自启：\(autoStartEnabled ? "已开启" : "已关闭")",
             "应用：\(Bundle.main.bundlePath)"
         ].joined(separator: "\n")
+    }
+
+    // MARK: - Updates
+
+    @objc private func checkForUpdates() {
+        guard !updateBusy else { return }
+        updateBusy = true
+        presentUpdatePanel(status: "正在检查更新…", indeterminate: true)
+        updateManager.checkForUpdates { [weak self] result in
+            guard let self, self.updateBusy else { return }
+            self.updateBusy = false
+            self.dismissUpdatePanel()
+            switch result {
+            case .success(let release?):
+                self.offerUpdate(release)
+            case .success(nil):
+                self.presentMessage("已是最新版本", detail: "当前版本 \(self.currentVersionString) 已是最新。")
+            case .failure(let error):
+                self.presentError("无法检查更新", detail: error.localizedDescription)
+            }
+        }
+    }
+
+    private func offerUpdate(_ release: UpdateManager.Release) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "发现新版本 \(release.version)"
+        var detail = "当前版本 \(currentVersionString)。"
+        let notes = release.notes.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !notes.isEmpty {
+            detail += "\n\n更新说明：\n\(String(notes.prefix(1200)))"
+            if notes.count > 1200 { detail += "\n…" }
+        }
+        detail += "\n\n下载完成后会自动安装并重新启动。"
+        alert.informativeText = detail
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "下载并安装")
+        alert.addButton(withTitle: "稍后")
+        if alert.runModal() == .alertFirstButtonReturn {
+            startUpdateDownload(release)
+        }
+    }
+
+    private func startUpdateDownload(_ release: UpdateManager.Release) {
+        guard Bundle.main.bundlePath.hasPrefix("/Applications/") else {
+            presentError(
+                "无法自动安装",
+                detail: "自动更新仅支持安装在“应用程序”文件夹中的版本。当前运行位置：\(Bundle.main.bundlePath)"
+            )
+            return
+        }
+
+        updateBusy = true
+        presentUpdatePanel(status: "正在下载 \(release.version)…", indeterminate: false)
+        updateManager.download(release, progress: { [weak self] fraction in
+            guard let panel = self?.updatePanel else { return }
+            panel.setProgress(fraction)
+            panel.setStatus("正在下载 \(release.version)… \(Int(fraction * 100))%")
+        }, completion: { [weak self] result in
+            guard let self, self.updateBusy else { return }
+            switch result {
+            case .success(let dmgURL):
+                self.prepareUpdate(dmgURL: dmgURL, release: release)
+            case .failure(let error):
+                self.updateBusy = false
+                self.dismissUpdatePanel()
+                let nsError = error as NSError
+                if nsError.code != NSURLErrorCancelled {
+                    self.presentError("更新下载失败", detail: error.localizedDescription)
+                }
+            }
+        })
+    }
+
+    private func prepareUpdate(dmgURL: URL, release: UpdateManager.Release) {
+        updatePanel?.setStatus("正在准备安装…")
+        updatePanel?.setIndeterminate()
+        updatePanel?.setCancelEnabled(false)
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            do {
+                let plan = try self.updateManager.prepareInstall(dmgURL: dmgURL, release: release)
+                DispatchQueue.main.async {
+                    guard self.updateBusy else {
+                        self.updateManager.cleanup(plan)
+                        return
+                    }
+                    do {
+                        try self.updateManager.launchInstaller(plan)
+                        self.updateBusy = false
+                        self.dismissUpdatePanel()
+                        NSApp.terminate(nil)
+                    } catch {
+                        self.updateBusy = false
+                        self.dismissUpdatePanel()
+                        self.updateManager.cleanup(plan)
+                        self.presentError("无法开始安装更新", detail: error.localizedDescription)
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    guard self.updateBusy else { return }
+                    self.updateBusy = false
+                    self.dismissUpdatePanel()
+                    self.presentError("准备更新失败", detail: error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    private func presentUpdatePanel(status: String, indeterminate: Bool) {
+        dismissUpdatePanel()
+        let panel = UpdateProgressPanel(status: status, indeterminate: indeterminate) { [weak self] in
+            self?.cancelUpdate()
+        }
+        updatePanel = panel
+        panel.show()
+    }
+
+    private func dismissUpdatePanel() {
+        updatePanel?.orderOut(nil)
+        updatePanel?.close()
+        updatePanel = nil
+    }
+
+    private func cancelUpdate() {
+        guard updateBusy else { return }
+        updateBusy = false
+        updateManager.cancelAll()
+        dismissUpdatePanel()
+    }
+
+    private func presentMessage(_ message: String, detail: String) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.informativeText = detail
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "好")
+        alert.runModal()
     }
 
     // MARK: - Helpers
@@ -789,6 +1113,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if rate < 10_000_000 { return String(format: "%.1fM", rate / 1_000_000) }
         if rate < 1_000_000_000 { return String(format: "%.0fM", rate / 1_000_000) }
         return String(format: "%.1fG", rate / 1_000_000_000)
+    }
+
+    private static func stackedRate(_ rate: Double) -> String {
+        if rate < 1_000 { return "\(Int(rate.rounded()))B/s" }
+        if rate < 10_000 { return String(format: "%.1fK/s", rate / 1_000) }
+        if rate < 1_000_000 { return String(format: "%.0fK/s", rate / 1_000) }
+        if rate < 10_000_000 { return String(format: "%.1fM/s", rate / 1_000_000) }
+        if rate < 1_000_000_000 { return String(format: "%.0fM/s", rate / 1_000_000) }
+        return String(format: "%.1fG/s", rate / 1_000_000_000)
     }
 
     private static func rateText(_ rate: Double) -> String {
@@ -869,6 +1202,30 @@ if CommandLine.arguments.contains("--dump") {
     }
     print("SENSORS \(temperatures.count) total, \(primaryCPU.count) primary CPU, \(fallbackCPU.count) fallback CPU, \(diskTemperatures.count) storage")
     exit(0)
+}
+
+// MARK: - Update check (CLI)
+
+if CommandLine.arguments.contains("--check-update") {
+    let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
+    let manager = UpdateManager(currentVersion: version)
+    var finished = false
+    var exitCode: Int32 = 0
+    manager.checkForUpdates { result in
+        switch result {
+        case .success(let release?):
+            print("UPDATE_AVAILABLE \(release.version) \(release.assetName)")
+            print(release.assetURL.absoluteString)
+        case .success(nil):
+            print("UP_TO_DATE \(version)")
+        case .failure(let error):
+            print("CHECK_FAILED \(error.localizedDescription)")
+            exitCode = 1
+        }
+        finished = true
+    }
+    while !finished && RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1)) {}
+    exit(exitCode)
 }
 
 // MARK: - Single instance

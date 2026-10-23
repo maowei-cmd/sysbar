@@ -17,6 +17,8 @@ swiftc -O -swift-version 5 \
     Sources/TemperatureReader.swift \
     Sources/SensorClassifier.swift \
     Sources/NetworkSampler.swift \
+    Sources/Version.swift \
+    Sources/Updater.swift \
     -o "$APP_BUNDLE/Contents/MacOS/$EXECUTABLE" \
     -framework AppKit
 

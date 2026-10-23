@@ -8,7 +8,7 @@ A lightweight menu bar monitor for Apple Silicon Macs: CPU temperature & usage, 
 ![macOS](https://img.shields.io/badge/macOS-14%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-菜单栏格式：`CPU 86°/43% · RAM 84% · SSD 53° · ↓1.2M↑34K`（CPU 温度/使用率、内存、SSD 温度、下载/上传速度）。
+默认「双行数据」布局：上排是实时数值，下排是对应的参数简称；网络速度分两行显示，上排为上传 `↑`，下排为下载 `↓`。例如上排 `43% 86° 84% 53° ↑34K`、下排 `CPU TEMP RAM SSD ↓1.2M`。也可切换为单行「带标签」或「紧凑数字」。
 
 点击菜单栏数值可查看：
 
@@ -17,10 +17,11 @@ A lightweight menu bar monitor for Apple Silicon Macs: CPU temperature & usage, 
 - 内存占用：App 内存、常驻内存、压缩内存、空闲内存明细
 - 硬盘温度：内置 SSD 的 NAND 传感器，附传感器明细
 - 网络速度：实时下载/上传速度；各网卡的 IP、速率与累计流量
-- 菜单栏显示：显示项开关、带标签 / 紧凑数字、高对比底色
+- 菜单栏显示：显示项开关、双行数据 / 带标签 / 紧凑数字、高对比底色
 - 刷新间隔：1 / 2 / 5 秒
 - 开机自动启动开关
 - 诊断信息：温度来源、传感器数量、热状态、网络与设置状态，可一键复制
+- 检查更新：从 GitHub Releases 检查新版本，直接下载并自动安装
 - 退出
 
 CPU 温度超过 90°C 显示橙色、超过 100°C 显示红色；SSD 温度超过 70°C 显示橙色、超过 80°C 显示红色；内存超过 90% 显示橙色、超过 95% 显示红色。
@@ -30,10 +31,27 @@ CPU 温度超过 90°C 显示橙色、超过 100°C 显示红色；SSD 温度超
 菜单中的「菜单栏显示」可以：
 
 - 分别开关 CPU / 内存 / 硬盘温度 / 网络速度，至少保留一项
-- 在「带标签」（`CPU 86°/43% · RAM 84% · SSD 53° · ↓1.2M↑34K`）与「紧凑数字」（`86°/43% 84% 53° ↓1.2M↑34K`）之间切换
+- 在三种布局之间切换：
+  - 「双行数据」（默认）：上排动态数值，下排参数简称；网络速度上排为上传（`↑`），下排为下载（`↓`）
+  - 「带标签」：`CPU 86°/43% · RAM 84% · SSD 53° · ↓1.2M↑34K`
+  - 「紧凑数字」：`86°/43% 84% 53° ↓1.2M↑34K`
 - 开关「高对比底色」：默认开启，为菜单栏文字加半透明深色底，浅色壁纸下也能看清
 
 菜单栏文字统一使用白色，并带细描边和阴影，减少不同屏幕、壁纸下颜色和对比度不一致的问题。
+
+## 检查更新
+
+菜单中的「检查更新…」会请求 GitHub Releases 的最新版本，发现版本更高时可直接下载 DMG 并自动安装，完成后应用会重新启动。
+
+- 下载后会把安装包中的应用与当前版本比对，并校验 Bundle ID、版本号和代码签名
+- 自动安装仅支持位于 `/Applications` 的版本；从磁盘映像直接运行时请手动拖入“应用程序”
+- 更新过程只访问 GitHub API 和 GitHub 的发布包地址，不上传任何数据
+
+也可以在终端检查版本：
+
+```bash
+"/Applications/系统监控.app/Contents/MacOS/SysBar" --check-update
+```
 
 ## 安装位置
 
@@ -75,7 +93,7 @@ ditto "build/系统监控.app" "/Applications/系统监控.app"
 
 ## 隐私
 
-本应用不联网、不上传数据、不包含遥测；CPU、内存、温度、网络等指标均在本机读取。
+除手动「检查更新」会访问 GitHub API 并下载发布包外，本应用不联网、不上传数据、不包含遥测；CPU、内存、温度、网络等指标均在本机读取。检查更新不会发送设备信息或使用数据。
 
 ## 数据口径
 
@@ -100,7 +118,16 @@ ditto "build/系统监控.app" "/Applications/系统监控.app"
 - `Sources/TemperatureReader.swift`：IOHID 温度读取与备用来源
 - `Sources/SensorClassifier.swift`：温度传感器分类与兜底规则
 - `Sources/NetworkSampler.swift`：网卡计数、速率与 IP
-- `Tests/main.swift` + `test.sh`：传感器分类规则测试
+- `Sources/Version.swift`：版本号解析与比较
+- `Sources/Updater.swift`：GitHub Release 检查、下载、校验与自动安装
+- `Tests/main.swift` + `test.sh`：传感器分类与版本比较测试
+
+## 发布新版本
+
+1. 更新 `Info.plist` 中的 `CFBundleShortVersionString` 和 `CFBundleVersion`。
+2. 运行 `./test.sh && ./build.sh`，将 `.app` 打包为 DMG。
+3. 以 `vX.Y` 为标签创建 GitHub Release，并上传文件名包含 `AppleSilicon` 的 `.dmg` 资产。
+4. 已安装旧版本的用户即可在菜单中「检查更新…」检测到该版本。
 
 ## 贡献
 
