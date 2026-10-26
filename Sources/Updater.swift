@@ -27,6 +27,7 @@ final class UpdateManager: NSObject, URLSessionDownloadDelegate {
         case invalidBundle(String)
         case notWritable(String)
         case installFailed(String)
+        case checkFailed(String)
 
         var errorDescription: String? {
             switch self {
@@ -50,12 +51,15 @@ final class UpdateManager: NSObject, URLSessionDownloadDelegate {
                 return "没有权限写入 \(path)。请确认应用位于“应用程序”文件夹，且当前用户有管理员权限。"
             case .installFailed(let detail):
                 return "无法启动更新安装：\(detail)"
+            case .checkFailed(let detail):
+                return detail
             }
         }
     }
 
     static let repository = "maowei-cmd/sysbar"
     static let latestReleaseURL = URL(string: "https://api.github.com/repos/\(repository)/releases/latest")!
+    static let releasesAtomURL = URL(string: "https://github.com/\(repository)/releases.atom")!
 
     let currentVersion: AppVersion
     let bundleIdentifier: String
@@ -68,6 +72,7 @@ final class UpdateManager: NSObject, URLSessionDownloadDelegate {
     }()
 
     private var checkTask: URLSessionDataTask?
+    private var checkCancelled = false
     private var downloadTask: URLSessionDownloadTask?
     private var downloadHandler: ((Result<URL, Error>) -> Void)?
     private var progressHandler: ((Double) -> Void)?
@@ -81,46 +86,107 @@ final class UpdateManager: NSObject, URLSessionDownloadDelegate {
     // MARK: - Checking
 
     func checkForUpdates(completion: @escaping (Result<Release?, Error>) -> Void) {
-        var request = URLRequest(url: Self.latestReleaseURL)
-        request.httpMethod = "GET"
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        checkCancelled = false
+        checkViaAtom(completion: completion)
+    }
+
+    private func checkViaAtom(completion: @escaping (Result<Release?, Error>) -> Void) {
+        var request = URLRequest(url: Self.releasesAtomURL)
+        request.timeoutInterval = 12
+        request.setValue(
+            "application/atom+xml, application/xml;q=0.9, */*;q=0.8",
+            forHTTPHeaderField: "Accept"
+        )
         request.setValue("SysBar/\(currentVersion)", forHTTPHeaderField: "User-Agent")
 
         let currentVersion = currentVersion
-        checkTask = session.dataTask(with: request) { data, response, error in
-            if let error {
-                DispatchQueue.main.async { completion(.failure(error)) }
-                return
-            }
-            guard let http = response as? HTTPURLResponse else {
-                DispatchQueue.main.async { completion(.failure(UpdateError.badResponse)) }
-                return
-            }
-            guard (200..<300).contains(http.statusCode) else {
-                let message: String
-                switch http.statusCode {
-                case 404:
-                    message = "仓库还没有发布任何版本。"
-                case 403:
-                    message = "请求过于频繁，请稍后再试。\(Self.apiMessage(from: data))"
-                default:
-                    message = Self.apiMessage(from: data)
+        checkTask = session.dataTask(with: request) { [weak self] data, response, error in
+            guard let self else { return }
+            DispatchQueue.main.async {
+                guard !self.checkCancelled else { return }
+                if let error {
+                    self.checkViaAPI(completion: completion, atomError: error)
+                    return
                 }
-                DispatchQueue.main.async { completion(.failure(UpdateError.http(http.statusCode, message))) }
-                return
-            }
-            do {
-                let release = try Self.decodeRelease(from: data)
+                guard
+                    let http = response as? HTTPURLResponse,
+                    (200..<300).contains(http.statusCode),
+                    let data,
+                    let release = Self.decodeAtomRelease(from: data)
+                else {
+                    let atomError: Error
+                    if let http = response as? HTTPURLResponse {
+                        atomError = UpdateError.http(http.statusCode, "无法读取 Releases 源。")
+                    } else {
+                        atomError = UpdateError.badResponse
+                    }
+                    self.checkViaAPI(completion: completion, atomError: atomError)
+                    return
+                }
                 let result: Release? = release.version > currentVersion ? release : nil
-                DispatchQueue.main.async { completion(.success(result)) }
-            } catch {
-                DispatchQueue.main.async { completion(.failure(error)) }
+                completion(.success(result))
             }
         }
         checkTask?.resume()
     }
 
+    private func checkViaAPI(completion: @escaping (Result<Release?, Error>) -> Void, atomError: Error?) {
+        var request = URLRequest(url: Self.latestReleaseURL)
+        request.timeoutInterval = 12
+        request.httpMethod = "GET"
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("SysBar/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+
+        let currentVersion = currentVersion
+        checkTask = session.dataTask(with: request) { [weak self] data, response, error in
+            guard let self else { return }
+            DispatchQueue.main.async {
+                guard !self.checkCancelled else { return }
+                if let error {
+                    completion(.failure(Self.combinedCheckError(atomError: atomError, apiError: error)))
+                    return
+                }
+                guard let http = response as? HTTPURLResponse else {
+                    completion(.failure(Self.combinedCheckError(atomError: atomError, apiError: UpdateError.badResponse)))
+                    return
+                }
+                guard (200..<300).contains(http.statusCode) else {
+                    let message: String
+                    switch http.statusCode {
+                    case 404:
+                        message = "仓库还没有发布任何版本。"
+                    case 403:
+                        message = "请求过于频繁，请稍后再试。\(Self.apiMessage(from: data))"
+                    default:
+                        message = Self.apiMessage(from: data)
+                    }
+                    let apiError = UpdateError.http(http.statusCode, message)
+                    completion(.failure(Self.combinedCheckError(atomError: atomError, apiError: apiError)))
+                    return
+                }
+                do {
+                    let release = try Self.decodeRelease(from: data)
+                    let result: Release? = release.version > currentVersion ? release : nil
+                    completion(.success(result))
+                } catch {
+                    completion(.failure(Self.combinedCheckError(atomError: atomError, apiError: error)))
+                }
+            }
+        }
+        checkTask?.resume()
+    }
+
+    private static func combinedCheckError(atomError: Error?, apiError: Error) -> Error {
+        if let atomError {
+            return UpdateError.checkFailed(
+                "暂时无法检查更新。Releases 源：\(atomError.localizedDescription) GitHub API：\(apiError.localizedDescription)"
+            )
+        }
+        return apiError
+    }
+
     func cancelCheck() {
+        checkCancelled = true
         checkTask?.cancel()
         checkTask = nil
     }
@@ -163,6 +229,50 @@ final class UpdateManager: NSObject, URLSessionDownloadDelegate {
             assetName: asset.name,
             assetURL: assetURL
         )
+    }
+
+    private static func decodeAtomRelease(from data: Data) -> Release? {
+        let atom = ReleasesAtomParser()
+        let parser = XMLParser(data: data)
+        parser.delegate = atom
+        guard parser.parse(), let entry = atom.firstEntry else { return nil }
+        guard
+            let link = URL(string: entry.link),
+            link.host?.lowercased() == "github.com"
+        else { return nil }
+
+        let tag = link.lastPathComponent
+        guard !tag.isEmpty, let version = AppVersion(tag) else { return nil }
+
+        let assetName = "SysBar-\(version)-AppleSilicon.dmg"
+        guard let assetURL = URL(string: "https://github.com/\(repository)/releases/download/\(tag)/\(assetName)") else {
+            return nil
+        }
+
+        let notes = plainText(fromHTML: entry.content)
+        return Release(
+            version: version,
+            tag: tag,
+            notes: notes.isEmpty ? entry.title : notes,
+            assetName: assetName,
+            assetURL: assetURL
+        )
+    }
+
+    private static func plainText(fromHTML html: String) -> String {
+        var text = html
+        text = text.replacingOccurrences(of: "<br\\s*/?>", with: "\n", options: .regularExpression)
+        text = text.replacingOccurrences(of: "<li>", with: "• ", options: .regularExpression)
+        text = text.replacingOccurrences(of: "</li>", with: "\n", options: .regularExpression)
+        text = text.replacingOccurrences(of: "</p>|</h[1-6]>", with: "\n", options: .regularExpression)
+        text = text.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+        text = text.replacingOccurrences(of: "&nbsp;", with: " ")
+        text = text.replacingOccurrences(of: "&amp;", with: "&")
+        text = text.replacingOccurrences(of: "&lt;", with: "<")
+        text = text.replacingOccurrences(of: "&gt;", with: ">")
+        text = text.replacingOccurrences(of: "&quot;", with: "\"")
+        text = text.replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression)
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: - Downloading
@@ -439,6 +549,93 @@ final class UpdateManager: NSObject, URLSessionDownloadDelegate {
     private struct GitHubAsset: Decodable {
         let id: Int
         let name: String
+    }
+}
+
+private final class ReleasesAtomParser: NSObject, XMLParserDelegate {
+    struct Entry {
+        let title: String
+        let content: String
+        let link: String
+    }
+
+    private(set) var firstEntry: Entry?
+    private var inEntry = false
+    private var inTitle = false
+    private var inContent = false
+    private var title = ""
+    private var content = ""
+    private var link: String?
+
+    func parser(
+        _ parser: XMLParser,
+        didStartElement elementName: String,
+        namespaceURI: String?,
+        qualifiedName qName: String?,
+        attributes attributeDict: [String: String] = [:]
+    ) {
+        switch elementName.lowercased() {
+        case "entry":
+            if firstEntry == nil {
+                inEntry = true
+                inTitle = false
+                inContent = false
+                title = ""
+                content = ""
+                link = nil
+            } else {
+                inEntry = false
+            }
+        case "title":
+            if inEntry { inTitle = true }
+        case "content":
+            if inEntry { inContent = true }
+        case "link":
+            if inEntry, link == nil {
+                let relation = attributeDict["rel"] ?? "alternate"
+                if relation == "alternate" {
+                    link = attributeDict["href"]
+                }
+            }
+        default:
+            break
+        }
+    }
+
+    func parser(_ parser: XMLParser, foundCharacters string: String) {
+        if inTitle { title += string }
+        if inContent { content += string }
+    }
+
+    func parser(_ parser: XMLParser, foundCDATA CDATABlock: Data) {
+        guard let string = String(data: CDATABlock, encoding: .utf8) else { return }
+        if inTitle { title += string }
+        if inContent { content += string }
+    }
+
+    func parser(
+        _ parser: XMLParser,
+        didEndElement elementName: String,
+        namespaceURI: String?,
+        qualifiedName qName: String?
+    ) {
+        switch elementName.lowercased() {
+        case "title":
+            inTitle = false
+        case "content":
+            inContent = false
+        case "entry":
+            if inEntry, firstEntry == nil {
+                firstEntry = Entry(
+                    title: title.trimmingCharacters(in: .whitespacesAndNewlines),
+                    content: content,
+                    link: link ?? ""
+                )
+            }
+            inEntry = false
+        default:
+            break
+        }
     }
 }
 

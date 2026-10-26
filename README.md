@@ -45,11 +45,12 @@ CPU 温度超过 90°C 显示橙色、超过 100°C 显示红色；系统盘温�
 
 ## 检查更新
 
-菜单中的「检查更新…」会请求 GitHub Releases 的最新版本，发现版本更高时可直接下载 DMG 并自动安装，完成后应用会重新启动。
+菜单中的「检查更新…」会读取 GitHub Releases 的公共 Atom 源获取最新版本，发现版本更高时可直接下载 DMG 并自动安装，完成后应用会重新启动。
 
+- 优先使用 `releases.atom`，不占用 GitHub API 配额；只有 Atom 源不可用时才回退到 GitHub API
 - 下载后会把安装包中的应用与当前版本比对，并校验 Bundle ID、版本号和代码签名
 - 自动安装仅支持位于 `/Applications` 的版本；从磁盘映像直接运行时请手动拖入“应用程序”
-- 更新过程只访问 GitHub API 和 GitHub 的发布包地址，不上传任何数据
+- 更新过程只访问 GitHub 的版本信息与发布包地址，不上传任何数据
 
 也可以在终端检查版本：
 
@@ -97,7 +98,7 @@ ditto "build/系统监控.app" "/Applications/系统监控.app"
 
 ## 隐私
 
-除手动「检查更新」会访问 GitHub API 并下载发布包外，本应用不联网、不上传数据、不包含遥测；CPU、内存、温度、网络等指标均在本机读取。检查更新不会发送设备信息或使用数据。
+除手动「检查更新」会访问 GitHub Releases（优先 Atom 源，必要时 GitHub API）并下载发布包外，本应用不联网、不上传数据、不包含遥测；CPU、内存、温度、网络等指标均在本机读取。检查更新不会发送设备信息或使用数据。
 
 ## 数据口径
 
@@ -135,7 +136,7 @@ ditto "build/系统监控.app" "/Applications/系统监控.app"
 
 1. 更新 `Info.plist` 中的 `CFBundleShortVersionString` 和 `CFBundleVersion`。
 2. 运行 `./test.sh && ./build.sh`，将 `.app` 打包为 DMG。
-3. 以 `vX.Y` 为标签创建 GitHub Release，并上传文件名包含 `AppleSilicon` 的 `.dmg` 资产。
+3. 以 `vX.Y` 为标签创建 GitHub Release，并上传名为 `SysBar-X.Y-AppleSilicon.dmg` 的资产（名称包含 `AppleSilicon`，Atom 检查路径会据此构造下载地址）。
 4. 已安装旧版本的用户即可在菜单中「检查更新…」检测到该版本。
 
 ## 贡献
