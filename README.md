@@ -4,9 +4,9 @@
 
 # 系统监控 / SysBar
 
-一个常驻 macOS 菜单栏的小工具，实时显示 CPU 温度、CPU 使用率、内存占用率、SSD 温度、网络速度。
+一个常驻 macOS 菜单栏的小工具，实时显示 CPU 温度、CPU 使用率、内存占用率、系统盘温度、网络速度。
 
-A lightweight menu bar monitor for Apple Silicon Macs: CPU temperature & usage, memory, SSD temperature, and network throughput.
+A lightweight menu bar monitor for Apple Silicon Macs: CPU temperature & usage, memory, system disk temperature, and network throughput.
 
 ![Platform](https://img.shields.io/badge/platform-Apple%20Silicon-black)
 ![macOS](https://img.shields.io/badge/macOS-14%2B-blue)
@@ -16,10 +16,10 @@ A lightweight menu bar monitor for Apple Silicon Macs: CPU temperature & usage, 
 
 点击菜单栏数值可查看：
 
-- CPU 温度：最高核心温度，附 14 个 CPU 温度传感器明细（PMU tdie）
+- CPU 温度：最高核心温度，附各核心温度传感器明细（PMU tdie）
 - CPU 使用率：总体 + 每个核心
 - 内存占用：App 内存、常驻内存、压缩内存、空闲内存明细
-- 硬盘温度：内置 SSD 的 NAND 传感器，附传感器明细
+- 系统盘温度：自动识别启动盘并读取该盘自身的 NVMe SMART 温度，附型号、位置和传感器明细
 - 网络速度：实时下载/上传速度；各网卡的 IP、速率与累计流量
 - 菜单栏显示：显示项开关、双行数据 / 带标签 / 紧凑数字、高对比底色
 - 刷新间隔：1 / 2 / 5 秒
@@ -28,13 +28,13 @@ A lightweight menu bar monitor for Apple Silicon Macs: CPU temperature & usage, 
 - 检查更新：从 GitHub Releases 检查新版本，直接下载并自动安装
 - 退出
 
-CPU 温度超过 90°C 显示橙色、超过 100°C 显示红色；SSD 温度超过 70°C 显示橙色、超过 80°C 显示红色；内存超过 90% 显示橙色、超过 95% 显示红色。
+CPU 温度超过 90°C 显示橙色、超过 100°C 显示红色；系统盘温度超过 70°C 显示橙色、超过 80°C 显示红色；内存超过 90% 显示橙色、超过 95% 显示红色。
 
 ## 菜单栏显示与可读性
 
 菜单中的「菜单栏显示」可以：
 
-- 分别开关 CPU / 内存 / 硬盘温度 / 网络速度，至少保留一项
+- 分别开关 CPU / 内存 / 系统盘温度 / 网络速度，至少保留一项
 - 在三种布局之间切换：
   - 「双行数据」（默认）：上排动态数值，下排参数简称；网络速度上排为上传（`↑`），下排为下载（`↓`）
   - 「带标签」：`CPU 86°/43% · RAM 84% · SSD 53° · ↓1.2M↑34K`
@@ -70,7 +70,7 @@ CPU 温度超过 90°C 显示橙色、超过 100°C 显示红色；SSD 温度超
 - **系统**：macOS 14 Sonoma 及以上（二进制最低部署版本 14.0）。
 - **CPU 使用率、内存、网络**：与机型无关，所有 Apple Silicon Mac 可用。
 - **CPU 温度**：优先读取 IOHID 的 `PMU tdie` 传感器；没有时按 `CPU / SOC / PACC / EACC / CORE / DIE` 规则使用备用传感器。不同机型的传感器命名可能不同，仍不可用时显示 `--°`，诊断信息会给出原因。
-- **硬盘温度**：仅内置 SSD，且需要机型暴露 `NAND / SSD / NVMe` 温度传感器；外接硬盘不支持。
+- **系统盘温度**：自动识别根卷所在的物理盘，并通过该盘的 NVMe SMART 读取自身温度。内置 Apple SSD 和雷电/PCIe 外置 NVMe 系统盘可用；USB/SATA 外置盘、磁盘阵列或虚拟磁盘如果不暴露 NVMe SMART 温度，会显示 `--°`，不会改用其他磁盘的传感器。
 - 窄菜单栏或刘海屏机型，可通过「菜单栏显示」隐藏部分指标或切换紧凑数字。
 - 目前仅在 M4 Mac mini（macOS 27）上实测；其他 Apple Silicon 机型未逐台验证。
 
@@ -104,14 +104,16 @@ ditto "build/系统监控.app" "/Applications/系统监控.app"
 - **CPU 温度**：优先读取 IOHID 的 `PMU tdie` 组并取最高核心温度；没有主传感器时，按 `CPU / SOC / PACC / EACC / CORE / DIE` 命名规则使用备用传感器，并在菜单和诊断中标注来源。无需 sudo，也不依赖第三方组件。
 - **CPU 使用率**：`host_processor_info` 两次采样间的 tick 增量，按核心与总体计算。
 - **内存占用**：`host_statistics64`，`已用 = App 内存 + 常驻内存 + 压缩内存`，与活动监视器的「已用内存」口径接近。
-- **SSD 温度**：读取 IOHID 中内置 SSD 的 `NAND` 温度传感器；外接硬盘通常不通过该接口提供温度。
+- **系统盘温度**：从根卷所在设备向上找到对应 NVMe 控制器的 SMART 接口，读取 NVMe SMART/Health Log（Log 0x02）的复合温度，并附带寿命消耗；无需 root。IOHID 的 NAND 传感器只在明细中作为内置盘参考，不会用于外置系统盘。
 - **网络速度**：通过 `NET_RT_IFLIST2` 读取系统 64 位收发计数器，统计所有物理网卡（`en*`），按采样间隔计算速率；VPN、回环等虚拟接口不计入，避免重复统计。
 
-温度使用私有 IOHID 接口，若系统大版本升级后不可用，菜单会显示 `--°`，并在温度子菜单和「诊断信息」里给出原因和系统热状态。可用以下命令检查采集是否正常：
+温度使用 IOHID 与 NVMe SMART 接口，若系统大版本升级后不可用，菜单会显示 `--°`，并在温度子菜单和「诊断信息」里给出原因和系统热状态。可用以下命令检查采集是否正常：
 
 ```bash
 "/Applications/系统监控.app/Contents/MacOS/SysBar" --dump
 ```
+
+`--dump` 会输出 `SYSTEM_DISK`（系统盘型号、设备、内外置位置）、`DISK_TEMP`（系统盘实际温度及来源）和 `IOHID_DISK_SENSORS`（内置盘 NAND 传感器，作为参考）。
 
 诊断信息包含应用运行时间（不是系统开机时间）、温度来源与传感器数量、系统热状态、网卡状态和当前菜单栏设置。若温度不可用，可先运行上面的命令并把输出发给维护者。
 
@@ -121,6 +123,8 @@ ditto "build/系统监控.app" "/Applications/系统监控.app"
 - `Sources/Samplers.swift`：CPU 使用率与内存采样
 - `Sources/TemperatureReader.swift`：IOHID 温度读取与备用来源
 - `Sources/SensorClassifier.swift`：温度传感器分类与兜底规则
+- `Sources/SystemDiskReader.swift`：识别启动盘并读取其 NVMe SMART 温度
+- `Sources/NVMeSMART.c`：IOKit NVMe SMART 接口封装
 - `Sources/NetworkSampler.swift`：网卡计数、速率与 IP
 - `Sources/Version.swift`：版本号解析与比较
 - `Sources/Updater.swift`：GitHub Release 检查、下载、校验与自动安装

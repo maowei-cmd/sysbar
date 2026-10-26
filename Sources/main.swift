@@ -17,7 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             switch self {
             case .cpu: return "CPU 温度/使用率"
             case .memory: return "内存占用"
-            case .disk: return "硬盘温度"
+            case .disk: return "系统盘温度"
             case .network: return "网络速度"
             }
         }
@@ -49,6 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let memorySampler = MemorySampler()
     private let temperatureReader = TemperatureReader()
     private let networkSampler = NetworkSampler()
+    private let systemDiskReader = SystemDiskReader()
     private var timer: Timer?
 
     private var cpuSample = CPUSample()
@@ -115,6 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         cpuSample = cpuSampler.sample()
         memorySample = memorySampler.sample()
         temperatures = temperatureReader.read(scope: .primary)
+        systemDiskReader.refresh(nandTemperatures: diskTemperatures.map(\.celsius))
         networkSample = networkSampler.sample()
         updateStatusItem()
     }
@@ -163,13 +165,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private var diskTemperature: Double? {
-        diskTemperatures.map(\.celsius).max()
+        systemDiskReader.reading.temperature
+    }
+
+    private var diskTemperatureSource: String {
+        systemDiskReader.reading.source ?? diskUnavailableReason
     }
 
     private var diskUnavailableReason: String {
-        if let issue = temperatureReader.initializationIssue { return issue }
-        if temperatureReader.totalSensorCount == 0 { return "未发现温度传感器" }
-        return "未发现 NAND 温度传感器"
+        systemDiskReader.reading.unavailableReason ?? "系统盘温度不可用"
+    }
+
+    private var systemDiskNote: String? {
+        systemDiskReader.reading.note
     }
 
     private var thermalStateDescription: String {
@@ -338,9 +346,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         tooltip.append("CPU 使用率 \(Self.oneDecimal(cpuSample.total))%")
         tooltip.append("内存占用 \(Self.oneDecimal(memorySample.percent))%（\(gigabytes(memorySample.used)) / \(gigabytes(memorySample.total)) GB）")
         if let temperature = diskTemperature {
-            tooltip.append("硬盘温度 \(Self.oneDecimal(temperature))°C")
+            tooltip.append("系统盘温度 \(Self.oneDecimal(temperature))°C（\(diskTemperatureSource)）")
         } else {
-            tooltip.append("硬盘温度 不可用（\(diskUnavailableReason)）")
+            tooltip.append("系统盘温度 不可用（\(diskUnavailableReason)）")
         }
         tooltip.append("网络 ↓ \(Self.rateText(networkSample.downloadPerSecond)) ↑ \(Self.rateText(networkSample.uploadPerSecond))")
         button.toolTip = tooltip.joined(separator: " ｜ ") + "\n点击查看详情"
@@ -354,7 +362,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             accessibility.append("内存 \(memoryText)")
         }
         if MenuBarMetric.disk.isVisible {
-            accessibility.append("硬盘温度 \(diskText)")
+            accessibility.append("系统盘温度 \(diskText)")
         }
         if MenuBarMetric.network.isVisible {
             accessibility.append("上传 \(Self.rateText(networkSample.uploadPerSecond))，下载 \(Self.rateText(networkSample.downloadPerSecond))")
@@ -505,9 +513,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let diskValue = diskTemperature.map { "\(Self.oneDecimal($0)) °C" } ?? "不可用"
         menu.addItem(metricItem(
-            label: "硬盘温度",
+            label: "系统盘温度",
             value: diskValue,
-            note: diskTemperature == nil ? nil : "内置 SSD",
+            note: systemDiskNote,
             valueColor: diskColor,
             submenu: makeDiskTemperatureMenu()
         ))
@@ -670,17 +678,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func makeDiskTemperatureMenu() -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
+        let systemDisk = systemDiskReader.reading
+
+        if let model = systemDisk.model {
+            menu.addItem(disabledItem("系统盘：\(model)"))
+        } else {
+            menu.addItem(disabledItem("系统盘：未识别"))
+        }
+
+        var details: [String] = []
+        if let location = systemDisk.location { details.append(location) }
+        if let interconnect = systemDisk.interconnect { details.append(interconnect) }
+        if let bsdName = systemDisk.bsdName { details.append("设备 \(bsdName)") }
+        if let percentageUsed = systemDisk.percentageUsed {
+            details.append("寿命消耗 \(percentageUsed)%")
+        }
+        if !details.isEmpty {
+            menu.addItem(disabledItem(details.joined(separator: " · ")))
+        }
+
+        if let temperature = systemDisk.temperature {
+            let source = systemDisk.source ?? "NVMe SMART"
+            menu.addItem(disabledItem("温度：\(Self.oneDecimal(temperature)) °C（\(source)）"))
+        } else {
+            menu.addItem(disabledItem("温度不可用：\(diskUnavailableReason)"))
+        }
+
         let readings = diskTemperatures.sorted { $0.celsius > $1.celsius }
-        guard !readings.isEmpty else {
-            menu.addItem(disabledItem("硬盘温度不可用：\(diskUnavailableReason)"))
-            menu.addItem(disabledItem("内置 SSD 可能不暴露 NAND 温度传感器"))
-            menu.addItem(disabledItem("系统热状态：\(thermalStateDescription)"))
-            return menu
+        if !readings.isEmpty {
+            menu.addItem(.separator())
+            if systemDisk.isInternal {
+                menu.addItem(disabledItem("内置 SSD NAND 传感器"))
+            } else if systemDisk.location == "外置" {
+                menu.addItem(disabledItem("内置盘传感器（非系统盘）"))
+            } else {
+                menu.addItem(disabledItem("IOHID 存储传感器"))
+            }
+            for reading in readings {
+                menu.addItem(sensorItem(reading))
+            }
         }
-        menu.addItem(disabledItem("内置 SSD（NAND）"))
-        for reading in readings {
-            menu.addItem(sensorItem(reading))
-        }
+
+        menu.addItem(.separator())
+        menu.addItem(disabledItem("系统热状态：\(thermalStateDescription)"))
         return menu
     }
 
@@ -889,10 +929,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let diskText: String
         if let temperature = diskTemperature {
-            diskText = "\(Self.oneDecimal(temperature))°C（\(diskTemperatures.map(\.name).joined(separator: "、"))）"
+            diskText = "\(Self.oneDecimal(temperature))°C（\(diskTemperatureSource)）"
         } else {
             diskText = "不可用（\(diskUnavailableReason)）"
         }
+
+        let systemDisk = systemDiskReader.reading
+        let systemDiskInfo: String
+        if let model = systemDisk.model {
+            var parts = [model]
+            if let location = systemDisk.location { parts.append(location) }
+            if let interconnect = systemDisk.interconnect { parts.append(interconnect) }
+            if let bsdName = systemDisk.bsdName { parts.append("设备 \(bsdName)") }
+            systemDiskInfo = parts.joined(separator: "｜")
+        } else {
+            systemDiskInfo = "未识别（\(diskUnavailableReason)）"
+        }
+
+        let internalSensors = diskTemperatures
+            .map { "\($0.name) \(Self.oneDecimal($0.celsius))°C" }
+            .joined(separator: "、")
+        let internalSensorNote = systemDisk.isInternal ? "系统盘所在内置 SSD" : "可能是内置盘，非系统盘"
 
         let sensorText: String
         if let issue = temperatureReader.initializationIssue {
@@ -921,7 +978,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             "系统：\(ProcessInfo.processInfo.operatingSystemVersionString)｜\(hardwareModel)｜\(architectureName)",
             "运行时间 \(Self.durationText(Date().timeIntervalSince(startedAt)))",
             "CPU 温度：\(cpuText)",
-            "硬盘温度：\(diskText)",
+            "系统盘：\(systemDiskInfo)",
+            "系统盘温度：\(diskText)",
+            "IOHID 存储传感器：\(internalSensors.isEmpty ? "无" : internalSensors)（\(internalSensorNote)）",
             "温度接口：\(sensorText)",
             "系统热状态：\(thermalStateDescription)",
             "网络：\(networkText)",
@@ -1172,6 +1231,9 @@ if CommandLine.arguments.contains("--dump") {
     let fallbackCPU = temperatures.filter(\.isCPUFallback)
     let activeCPU = primaryCPU.isEmpty ? fallbackCPU : primaryCPU
     let diskTemperatures = temperatures.filter(\.isDisk)
+    let systemDiskReader = SystemDiskReader()
+    systemDiskReader.refresh(nandTemperatures: diskTemperatures.map(\.celsius), force: true)
+    let systemDisk = systemDiskReader.reading
 
     print("CPU_USAGE \(String(format: "%.1f", cpu.total))% (\(cpu.cores.count) cores)")
     if let maximum = activeCPU.map(\.celsius).max() {
@@ -1181,10 +1243,17 @@ if CommandLine.arguments.contains("--dump") {
         print("CPU_TEMP unavailable (\(reader.initializationIssue ?? "未发现 CPU 温度传感器"))")
     }
     print("MEMORY \(String(format: "%.1f", memory.percent))% (\(String(format: "%.1f", Double(memory.used) / 1_073_741_824)) / \(String(format: "%.1f", Double(memory.total) / 1_073_741_824)) GB)")
-    if let maximum = diskTemperatures.map(\.celsius).max() {
-        print("DISK_TEMP \(String(format: "%.1f", maximum))°C (\(diskTemperatures.map(\.name).joined(separator: ", ")))")
+    print("SYSTEM_DISK \(systemDisk.bsdName ?? "?") model=\(systemDisk.model ?? "unknown") location=\(systemDisk.location ?? "unknown") interconnect=\(systemDisk.interconnect ?? "unknown")")
+    if let temperature = systemDisk.temperature {
+        print("DISK_TEMP \(String(format: "%.1f", temperature))°C (source=\(systemDisk.source ?? "NVMe SMART"))")
     } else {
-        print("DISK_TEMP unavailable (\(reader.initializationIssue ?? "未发现 NAND 温度传感器"))")
+        print("DISK_TEMP unavailable (\(systemDisk.unavailableReason ?? "系统盘未提供温度"))")
+    }
+    if let percentageUsed = systemDisk.percentageUsed {
+        print("DISK_USED \(percentageUsed)%")
+    }
+    if !diskTemperatures.isEmpty {
+        print("IOHID_DISK_SENSORS \(diskTemperatures.map { "\($0.name)=\(String(format: "%.1f", $0.celsius))°C" }.joined(separator: ", "))")
     }
     let interfaces = network.interfaces.map { "\($0.name)\($0.ipAddress.map { "=\($0)" } ?? "")" }.joined(separator: ", ")
     print("NETWORK ↓\(Int(network.downloadPerSecond)) B/s ↑\(Int(network.uploadPerSecond)) B/s [\(interfaces)]")
